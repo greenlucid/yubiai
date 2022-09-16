@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@kleros/dispute-resolver-interface-contract": "^8.0.0",
+    "@kleros/erc-792": "^8.0.0",
+    "@openzeppelin/contracts": "^4.7.3"
+  }
+}
