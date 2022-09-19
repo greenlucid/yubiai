@@ -41,13 +41,14 @@ contract Yubiai is IDisputeResolver {
     uint256 createdAt;
     uint256 solvedAt; // if zero, unsolved yet.
     uint256 ruling;
+    uint256 arbSettingsId;
     Round[] rounds;
   }
 
   struct Deal {
-    string terms;
     address buyer;
     DealState state;
+    uint32 extraBurnFee;
     uint32 claimCount;
     address seller;
     IERC20 token;
@@ -67,22 +68,24 @@ contract Yubiai is IDisputeResolver {
     // fees are in basis points
     uint32 adminFee;
     uint32 ubiFee;
-    uint32 freeSpace;
+    uint32 maxExtraFee; // this must be at all times under 10000 to prevent drain attacks.
     // ---
+    // enforce timespans for prevent attacks
+    uint32 minTimeForService;
     uint32 maxTimeForService;
+    uint32 minTimeForClaim;
     uint32 maxTimeForClaim;
   }
 
-  event DealCreated(uint256 indexed _dealId, Deal _deal);
-  event ClaimCreated(uint256 indexed _dealId, uint256 indexed _claimId, uint256 _amount, string _evidence);
+  event DealCreated(uint256 indexed dealId, Deal deal, string terms);
+  event ClaimCreated(uint256 indexed dealId, uint256 indexed claimId, uint256 amount, string evidence);
   
-  event ClaimClosed(uint256 indexed _claimId, ClaimResult indexed _result);
+  event ClaimClosed(uint256 indexed claimId, ClaimResult indexed result);
 
   event DealClosed(
-    uint256 indexed _dealId, uint256 _payment, uint256 _refund,
-    uint256 _ubiFee, uint256 _adminFee
+    uint256 indexed dealId, uint256 payment, uint256 refund,
+    uint256 ubiFee, uint256 adminFee
   );
-
 
   /// 0: Refuse to Arbitrate (Don't refund)
   /// 1: Don't refund
@@ -104,50 +107,109 @@ contract Yubiai is IDisputeResolver {
   mapping(uint256 => Deal) public deals;
   mapping(uint256 => Claim) public claims;
 
+  IArbitrator public arbitrator;
+  uint256 public currentArbSettingId;
   mapping(uint256 => uint256) public disputeIdToClaim;
+  mapping(uint256 => bytes) public extraDatas;
   mapping(IERC20 => bool) public tokenValidity;
 
-  IArbitrator public arbitrator; // keep it simple. just one arbitrator. cannot be updated.
-  bytes public arbitratorExtraData; // just one arbitratorExtraData. should seldom be updated.
-
-  constructor(YubiaiSettings memory _settings, string memory _metaEvidence) {
+  /**
+   * @dev Initializes the contract.
+   * @param _settings Initial settings of Yubiai.
+   * @param _governor Governor of Yubiai, can change settings.
+   * @param _metaEvidence The immutable metaEvidence.
+   */
+  constructor(
+    YubiaiSettings memory _settings,
+    address _governor,
+    IArbitrator _arbitrator,
+    bytes memory _extraData,
+    string memory _metaEvidence
+  ) {
     settings = _settings;
-    emit MetaEvidence(0, _metaEvidence); // metaEvidence would be immutable.
+    governor = _governor;
+    arbitrator = _arbitrator;
+    extraDatas[0] = _extraData;
+    emit MetaEvidence(0, _metaEvidence);
   }
 
+  /**
+   * @dev Change settings of Yubiai, only governor.
+   * @param _settings New settings.
+   */
   function changeSettings(YubiaiSettings memory _settings) external {
     require(msg.sender == governor, "Only governor");
     settings = _settings;
   }
 
+  /**
+   * @dev Change governor of Yubiai, only governor.
+   * @param _governor New governor.
+   */
+  function changeGovernor(address _governor) external {
+    require(msg.sender == governor, "Only governor");
+    governor = _governor;
+  }
+
+  /**
+   * @dev Change arbSettings of Yubiai, only governor.
+   * @param _extraData New arbitratorExtraData
+   * @param _metaEvidence New MetaEvidence
+   */
+  function newArbSettings(bytes calldata _extraData, string calldata _metaEvidence) external {
+    require(msg.sender == governor, "Only governor");
+    currentArbSettingId++;
+    extraDatas[currentArbSettingId] = _extraData;
+    emit MetaEvidence(currentArbSettingId, _metaEvidence);
+  }
+
+  /**
+   * @dev Toggle validity on an ERC20 token, only governor.
+   * @param _token Token to change validity of.
+   * @param _validity Whether if it's valid or not.
+   */
   function setTokenValidity(IERC20 _token, bool _validity) external {
     require(msg.sender == governor, "Only governor");
     tokenValidity[_token] = _validity;
   }
 
-  function createDeal(Deal memory _deal) public {
+  /**
+   * @dev Creates a deal, an agreement between buyer and seller.
+   * @param _deal The deal that is to be created. Some properties may be mutated.
+   */
+  function createDeal(Deal memory _deal, string memory _terms) public {
     require(
       _deal.token.transferFrom(msg.sender, address(this), _deal.amount),
       "Token transfer failed"
     );
     // offering received. that's all you need.
     _deal.createdAt = block.timestamp;
+    _deal.state = DealState.Ongoing;
+    _deal.claimCount = 0;
+    _deal.currentClaim = 0;
     // additional validation could take place here:
+    // verify max extra fee
+    require(_deal.extraBurnFee <= settings.maxExtraFee, "Extra fee too large");
     // only allowed tokens
     require(tokenValidity[_deal.token], "Invalid token");
     // only allowed time spans
+    require(_deal.timeForService >= settings.minTimeForService, "Too little time for service");
+    require(_deal.timeForClaim >= settings.minTimeForClaim, "Too little time for claim");
     require(_deal.timeForService <= settings.maxTimeForService, "Too much time for service");
     require(_deal.timeForClaim <= settings.maxTimeForClaim, "Too much time for claim");
     
     deals[dealCount] = _deal;
-    emit DealCreated(dealCount, _deal);
+    emit DealCreated(dealCount, _deal, _terms);
     dealCount++;
   }
 
+  /**
+   * @dev Closes a deal. Different actors can close the deal, depending on some conditions.
+   * @param _dealId The ID of the deal to be closed.
+   */
   function closeDeal(uint256 _dealId) public {
     Deal storage deal = deals[_dealId];
     require(deal.state == DealState.Ongoing, "Deal is not ongoing");
-    // different actors can close the deal, depending on some conditions.
     // 1. if over the time for service + claim, anyone can close it.
     if (isOver(_dealId)) {
       _closeDeal(_dealId, deal.amount);
@@ -170,23 +232,33 @@ contract Yubiai is IDisputeResolver {
     arbitration fees shouldn't change often anyway.
   */
 
+  /**
+   * @dev Make a claim on an existing claim. Only the buyer can claim.
+   * @param _dealId The ID of the deal to be closed.
+   * @param _amount Amount to be refunded.
+   * @param _evidence Rationale behind the requested refund.
+   */
   function makeClaim(uint256 _dealId, uint256 _amount, string calldata _evidence) external payable {
     Deal storage deal = deals[_dealId];
     require(msg.sender == deal.buyer, "Only buyer");
     require(deal.amount >= _amount, "Refund cannot be greater than deal");
     require(deal.state == DealState.Ongoing && !isOver(_dealId), "Deal cannot be claimed");
-    uint256 arbFees = arbitrator.arbitrationCost(arbitratorExtraData);
+    uint256 arbFees = arbitrator.arbitrationCost(extraDatas[currentArbSettingId]);
     require(msg.value >= arbFees, "Not enough to cover fees");
     Claim storage claim = claims[claimCount];
     claim.dealId = _dealId;
     claim.amount = _amount;
     claim.createdAt = block.timestamp;
+    claim.arbSettingsId = currentArbSettingId;
     emit ClaimCreated(_dealId, claimCount, _amount, _evidence);
-    emit Evidence(arbitrator, claimCount, msg.sender, _evidence);
     claimCount++;
     deal.state = DealState.Claimed;
   }
 
+  /**
+   * @dev Accept the claim and pay the refund, only be seller.
+   * @param _claimId The ID of the claim to accept.
+   */
   function acceptClaim(uint256 _claimId) public {
     Claim storage claim = claims[_claimId];
     Deal storage deal = deals[claim.dealId];
@@ -198,13 +270,18 @@ contract Yubiai is IDisputeResolver {
       require(deal.seller == msg.sender, "Only seller");
     }
 
-    uint256 arbFees = arbitrator.arbitrationCost(arbitratorExtraData);
-    payable(deal.buyer).send(arbFees); // it is buyer responsability to accept eth.
-    deal.token.transfer(deal.buyer, claim.amount);
+    uint256 arbFees = arbitrator.arbitrationCost(extraDatas[claim.arbSettingsId]);
     _closeDeal(claim.dealId, deal.amount - claim.amount);
     claim.solvedAt = block.timestamp;
+    deal.token.transfer(deal.buyer, claim.amount);
+    emit ClaimClosed(_claimId, ClaimResult.Accepted);
+    payable(deal.buyer).send(arbFees); // it is the buyer responsability to accept eth.
   }
 
+  /**
+   * @dev Challenge a refund claim, only by seller. A dispute will be created.
+   * @param _claimId The ID of the claim to challenge.
+   */
   function challengeClaim(uint256 _claimId) public payable {
     Claim storage claim = claims[_claimId];
     Deal storage deal = deals[claim.dealId];
@@ -212,20 +289,25 @@ contract Yubiai is IDisputeResolver {
     require(deal.state == DealState.Claimed, "Deal is not Claimed");
     require(block.timestamp < claim.createdAt + settings.timeForChallenge, "Too late for challenge");
 
-    uint256 arbFees = arbitrator.arbitrationCost(arbitratorExtraData);
+    uint256 arbFees = arbitrator.arbitrationCost(extraDatas[claim.arbSettingsId]);
     require(msg.value >= arbFees, "Not enough to cover fees");
 
     // all good now.
     uint256 disputeId =
-      arbitrator.createDispute{value: arbFees}(NUMBER_OF_RULINGS, arbitratorExtraData);
+      arbitrator.createDispute{value: arbFees}(NUMBER_OF_RULINGS, extraDatas[claim.arbSettingsId]);
     disputeIdToClaim[disputeId] = _claimId;
     claim.disputeId = disputeId;
 
     deal.state = DealState.Disputed;
     
-    emit Dispute(arbitrator, disputeId, 0, _claimId);
+    emit Dispute(arbitrator, disputeId, claim.arbSettingsId, _claimId);
   }
 
+  /**
+   * @dev Rule on a claim, only by arbitrator.
+   * @param _disputeId The external ID of the dispute.
+   * @param _ruling The ruling. 0 and 1 will not refund, 2 will refund.
+   */
   function rule(uint256 _disputeId, uint256 _ruling) external {
     require(msg.sender == address(arbitrator), "Only arbitrator rules");
     uint256 claimId = disputeIdToClaim[_disputeId];
@@ -235,24 +317,30 @@ contract Yubiai is IDisputeResolver {
     claim.solvedAt = block.timestamp;
     // get arb fees for refunds. if extraData was modified,
     // yubiai should send value to the contract to stop from halting.
-    uint256 arbFees = arbitrator.arbitrationCost(arbitratorExtraData);
+    uint256 arbFees = arbitrator.arbitrationCost(extraDatas[claim.arbSettingsId]);
     deal.state = DealState.Ongoing; // will be overwritten if needed.
     // if 0 (RtA) or 1 (Don't refund)...
     if (_ruling < 2) {
-      payable(deal.seller).send(arbFees);
       // was this the last claim? if so, close deal with everything
       if (deal.claimCount >= settings.maxClaims) {
         _closeDeal(claim.dealId, deal.amount);
       }
+      payable(deal.seller).send(arbFees);
+      emit ClaimClosed(claimId, ClaimResult.Rejected);
     } else {
-      // refund buyer
-      payable(deal.buyer).send(arbFees);
       deal.token.transfer(deal.buyer, claim.amount);
       _closeDeal(claim.dealId, deal.amount - claim.amount);
+      // refund buyer
+      payable(deal.buyer).send(arbFees);
+      emit ClaimClosed(claimId, ClaimResult.Accepted);
     }
     emit Ruling(arbitrator, _disputeId, _ruling);
   }
 
+  /**
+   * @dev Read whether if a claim is over or not.
+   * @param _dealId Id of the deal to check.
+   */
   function isOver(uint256 _dealId) public view returns (bool) {
     Deal memory deal = deals[_dealId];
     // if finished, then it's "over"
@@ -272,10 +360,14 @@ contract Yubiai is IDisputeResolver {
     }
   }
 
+  /**
+   * @dev Internal function to close the deal. It will process the fees
+   * @param _dealId Id of the deal to check.
+   */
   function _closeDeal(uint256 _dealId, uint256 _amount) internal {
     Deal storage deal = deals[_dealId];
 
-    uint256 ubiFee = _amount * settings.ubiFee / BASIS_POINTS;
+    uint256 ubiFee = _amount * (settings.ubiFee + deal.extraBurnFee) / BASIS_POINTS;
     uint256 adminFee = _amount * settings.adminFee / BASIS_POINTS;
 
     uint256 toSeller = _amount - ubiFee - adminFee;
@@ -299,17 +391,16 @@ contract Yubiai is IDisputeResolver {
   }
 
   /** @dev Returns number of possible ruling options. Valid rulings are [0, return value].
-  *  @param _localDisputeID Identifier of a dispute in scope of arbitrable contract. Arbitrator ids can be translated to local ids via externalIDtoLocalID.
-  *  @return count The number of ruling options.
-  */
-  function numberOfRulingOptions(uint256 _localDisputeID) external view override returns (uint256 count) {
+   *  @return count The number of ruling options.
+   */
+  function numberOfRulingOptions(uint256) external pure override returns (uint256 count) {
     count = NUMBER_OF_RULINGS;
   }
 
   /** @dev Allows to submit evidence for a given dispute.
-  *  @param _claimId Identifier of a dispute in scope of arbitrable contract. Arbitrator ids can be translated to local ids via externalIDtoLocalID.
-  *  @param _evidenceURI IPFS path to evidence, example: '/ipfs/Qmarwkf7C9RuzDEJNnarT3WZ7kem5bk8DZAzx78acJjMFH/evidence.json'
-  */
+   *  @param _claimId Identifier of a dispute in scope of arbitrable contract. Arbitrator ids can be translated to local ids via externalIDtoLocalID.
+   *  @param _evidenceURI IPFS path to evidence, example: '/ipfs/Qmarwkf7C9RuzDEJNnarT3WZ7kem5bk8DZAzx78acJjMFH/evidence.json'
+   */
   function submitEvidence(uint256 _claimId, string calldata _evidenceURI) external override {
     emit Evidence(arbitrator, _claimId, msg.sender, _evidenceURI);
   }
@@ -363,7 +454,7 @@ contract Yubiai is IDisputeResolver {
     uint256 lastRoundID = claim.rounds.length - 1;
     Round storage round = claim.rounds[lastRoundID];
     require(!round.hasPaid[_ruling], "Appeal fee is already paid.");
-    uint256 appealCost = arbitrator.appealCost(disputeId, arbitratorExtraData);
+    uint256 appealCost = arbitrator.appealCost(disputeId, extraDatas[claim.arbSettingsId]);
     uint256 totalCost = appealCost + (appealCost * multiplier / BASIS_POINTS);
 
     // Take up to the amount necessary to fund the current round at the current costs.
@@ -386,7 +477,7 @@ contract Yubiai is IDisputeResolver {
         claim.rounds.push();
 
         round.feeRewards = round.feeRewards - appealCost;
-        arbitrator.appeal{value: appealCost}(disputeId, arbitratorExtraData);
+        arbitrator.appeal{value: appealCost}(disputeId, extraDatas[claim.arbSettingsId]);
     }
 
     if (contribution < msg.value) payable(msg.sender).send(msg.value - contribution); // Sending extra value back to contributor. It is the user's responsibility to accept ETH.
@@ -394,13 +485,13 @@ contract Yubiai is IDisputeResolver {
   }
 
   /**
-    * @notice Sends the fee stake rewards and reimbursements proportional to the contributions made to the winner of a dispute. Reimburses contributions if there is no winner.
-    * @param _claimId The ID of the claim.
-    * @param _beneficiary The address to send reward to.
-    * @param _round The round from which to withdraw.
-    * @param _ruling The ruling to request the reward from.
-    * @return reward The withdrawn amount.
-    */
+   * @notice Sends the fee stake rewards and reimbursements proportional to the contributions made to the winner of a dispute. Reimburses contributions if there is no winner.
+   * @param _claimId The ID of the claim.
+   * @param _beneficiary The address to send reward to.
+   * @param _round The round from which to withdraw.
+   * @param _ruling The ruling to request the reward from.
+   * @return reward The withdrawn amount.
+   */
   function withdrawFeesAndRewards(
     uint256 _claimId,
     address payable _beneficiary,
@@ -434,13 +525,13 @@ contract Yubiai is IDisputeResolver {
   }
 
   /**
-    * @notice Allows to withdraw any rewards or reimbursable fees for all rounds at once.
-    * @dev This function is O(n) where n is the total number of rounds. Arbitration cost of subsequent rounds is `A(n) = 2A(n-1) + 1`.
-    *      So because of this exponential growth of costs, you can assume n is less than 10 at all times.
-    * @param _claimId The ID of the arbitration.
-    * @param _beneficiary The address that made contributions.
-    * @param _contributedTo Answer that received contributions from contributor.
-    */
+   * @notice Allows to withdraw any rewards or reimbursable fees for all rounds at once.
+   * @dev This function is O(n) where n is the total number of rounds. Arbitration cost of subsequent rounds is `A(n) = 2A(n-1) + 1`.
+   *      So because of this exponential growth of costs, you can assume n is less than 10 at all times.
+   * @param _claimId The ID of the arbitration.
+   * @param _beneficiary The address that made contributions.
+   * @param _contributedTo Answer that received contributions from contributor.
+   */
   function withdrawFeesAndRewardsForAllRounds(
     uint256 _claimId,
     address payable _beneficiary,
@@ -454,43 +545,43 @@ contract Yubiai is IDisputeResolver {
   }
 
   /**
-    * @notice Returns the sum of withdrawable amount.
-    * @dev This function is O(n) where n is the total number of rounds.
-    * @dev This could exceed the gas limit, therefore this function should be used only as a utility and not be relied upon by other contracts.
-    * @param _claimId The ID of the arbitration.
-    * @param _beneficiary The contributor for which to query.
-    * @param _contributedTo Answer that received contributions from contributor.
-    * @return sum The total amount available to withdraw.
-    */
-    function getTotalWithdrawableAmount(
-      uint256 _claimId,
-      address payable _beneficiary,
-      uint256 _contributedTo
-    ) external view override returns (uint256 sum) {
-      if (claims[_claimId].solvedAt == 0) return sum;
+   * @notice Returns the sum of withdrawable amount.
+   * @dev This function is O(n) where n is the total number of rounds.
+   * @dev This could exceed the gas limit, therefore this function should be used only as a utility and not be relied upon by other contracts.
+   * @param _claimId The ID of the arbitration.
+   * @param _beneficiary The contributor for which to query.
+   * @param _contributedTo Answer that received contributions from contributor.
+   * @return sum The total amount available to withdraw.
+   */
+  function getTotalWithdrawableAmount(
+    uint256 _claimId,
+    address payable _beneficiary,
+    uint256 _contributedTo
+  ) external view override returns (uint256 sum) {
+    if (claims[_claimId].solvedAt == 0) return sum;
 
-      uint256 finalAnswer = claims[_claimId].ruling;
-      uint256 noOfRounds = claims[_claimId].rounds.length;
-      for (uint256 roundNumber = 0; roundNumber < noOfRounds; roundNumber++) {
-        Round storage round = claims[_claimId].rounds[roundNumber];
+    uint256 finalAnswer = claims[_claimId].ruling;
+    uint256 noOfRounds = claims[_claimId].rounds.length;
+    for (uint256 roundNumber = 0; roundNumber < noOfRounds; roundNumber++) {
+      Round storage round = claims[_claimId].rounds[roundNumber];
 
-        if (!round.hasPaid[_contributedTo]) {
-          // Allow to reimburse if funding was unsuccessful for this answer option.
-          sum += round.contributions[_beneficiary][_contributedTo];
-        } else if (!round.hasPaid[finalAnswer]) {
-          // Reimburse unspent fees proportionally if the ultimate winner didn't pay appeal fees fully.
-          // Note that if only one side is funded it will become a winner and this part of the condition won't be reached.
-          sum += round.fundedAnswers.length > 1
-            ? (round.contributions[_beneficiary][_contributedTo] * round.feeRewards) /
-              (round.paidFees[round.fundedAnswers[0]] + round.paidFees[round.fundedAnswers[1]])
-            : 0;
-        } else if (finalAnswer == _contributedTo) {
-          uint256 paidFees = round.paidFees[_contributedTo];
-          // Reward the winner.
-          sum += paidFees > 0
-            ? (round.contributions[_beneficiary][_contributedTo] * round.feeRewards) / paidFees
-            : 0;
-        }
+      if (!round.hasPaid[_contributedTo]) {
+        // Allow to reimburse if funding was unsuccessful for this answer option.
+        sum += round.contributions[_beneficiary][_contributedTo];
+      } else if (!round.hasPaid[finalAnswer]) {
+        // Reimburse unspent fees proportionally if the ultimate winner didn't pay appeal fees fully.
+        // Note that if only one side is funded it will become a winner and this part of the condition won't be reached.
+        sum += round.fundedAnswers.length > 1
+          ? (round.contributions[_beneficiary][_contributedTo] * round.feeRewards) /
+            (round.paidFees[round.fundedAnswers[0]] + round.paidFees[round.fundedAnswers[1]])
+          : 0;
+      } else if (finalAnswer == _contributedTo) {
+        uint256 paidFees = round.paidFees[_contributedTo];
+        // Reward the winner.
+        sum += paidFees > 0
+          ? (round.contributions[_beneficiary][_contributedTo] * round.feeRewards) / paidFees
+          : 0;
       }
     }
+  }
 }
