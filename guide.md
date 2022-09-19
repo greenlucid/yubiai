@@ -103,7 +103,7 @@ Bob was burning an extra 4%. Adding this to the mandatory 1%, Bob will suffer a 
 95 (net income) + 5 (seller fee) + 10 (buyer donation) = **110 WXDAI**. So far, so good.
 
 In order to make it work, the tx Alice signs will imply there are 110 WXDAI as the buying price.
-But, if you 
+But, if you naively add the fees, more than 15 WXDAI will be sent towards burning UBI. So you need to calculate what the real, total extraBurn should be.
 
 So, TLDR:
 
