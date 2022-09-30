@@ -372,10 +372,10 @@ contract Yubiai is IDisputeResolver {
 
     uint256 toSeller = _amount - ubiFee - adminFee;
 
+    deal.state = DealState.Finished;
     deal.token.transfer(deal.seller, toSeller);
     deal.token.transfer(settings.admin, adminFee);
     deal.token.transfer(settings.ubiBurner, ubiFee);
-    deal.state = DealState.Finished;
 
     emit DealClosed(_dealId, toSeller, deal.amount - _amount, ubiFee, adminFee);
   }
