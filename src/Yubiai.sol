@@ -35,29 +35,37 @@ contract Yubiai is IDisputeResolver {
   }
 
   struct Claim {
-    uint256 dealId;
     uint256 disputeId;
     uint256 amount;
-    uint256 createdAt;
-    uint256 solvedAt; // if zero, unsolved yet.
-    uint256 ruling;
-    uint256 arbSettingsId;
     uint256 arbFees;
+    //
+    uint64 dealId;
+    uint32 createdAt;
+    uint32 solvedAt; // if zero, unsolved yet.
+    uint8 ruling;
+    uint64 arbSettingsId;
+    uint56 freeSpace;
+    //
     Round[] rounds;
   }
 
   struct Deal {
+    uint256 amount;
+    //
     address buyer;
     DealState state;
     uint32 extraBurnFee;
     uint32 claimCount;
+    uint24 freeSpace;
+    //
     address seller;
+    uint32 createdAt;
+    uint32 timeForService;
+    uint32 timeForClaim;
+    //
     IERC20 token;
-    uint256 amount;
-    uint256 createdAt;
-    uint256 timeForService;
-    uint256 timeForClaim;
-    uint256 currentClaim;
+    uint64 currentClaim;
+    uint32 freeSpace2;
   }
 
   struct YubiaiSettings {
@@ -65,6 +73,7 @@ contract Yubiai is IDisputeResolver {
     uint32 maxClaims; // max n claims per deal. a deal is automatically closed if last claim fails.
     uint32 timeForReclaim; // time the buyer has to create new claim after losing prev
     uint32 timeForChallenge; // time the seller has to challenge a claim, and accepted otherwise.
+    //
     address ubiBurner;
     // fees are in basis points
     uint32 adminFee;
@@ -78,13 +87,19 @@ contract Yubiai is IDisputeResolver {
     uint32 maxTimeForClaim;
   }
 
-  event DealCreated(uint256 indexed dealId, Deal deal, string terms);
-  event ClaimCreated(uint256 indexed dealId, uint256 indexed claimId, uint256 amount, string evidence);
+  struct Counters {
+    uint64 dealCount;
+    uint64 claimCount;
+    uint64 currentArbSettingId;
+  }
+
+  event DealCreated(uint64 indexed dealId, Deal deal, string terms);
+  event ClaimCreated(uint64 indexed dealId, uint64 indexed claimId, uint256 amount, string evidence);
   
-  event ClaimClosed(uint256 indexed claimId, ClaimResult indexed result);
+  event ClaimClosed(uint64 indexed claimId, ClaimResult indexed result);
 
   event DealClosed(
-    uint256 indexed dealId, uint256 payment, uint256 refund,
+    uint64 indexed dealId, uint256 payment, uint256 refund,
     uint256 ubiFee, uint256 adminFee
   );
 
@@ -100,18 +115,16 @@ contract Yubiai is IDisputeResolver {
   uint256 constant LOSER_STAKE_MULTIPLIER = 10_000;
   uint256 constant LOSER_APPEAL_PERIOD_MULTIPLIER = 5_000;
 
-  uint256 public dealCount;
-  uint256 public claimCount;
+  Counters public counters;
   YubiaiSettings public settings;
   address public governor;
 
-  mapping(uint256 => Deal) public deals;
-  mapping(uint256 => Claim) public claims;
+  mapping(uint64 => Deal) public deals;
+  mapping(uint64 => Claim) public claims;
 
   IArbitrator public arbitrator;
-  uint256 public currentArbSettingId;
-  mapping(uint256 => uint256) public disputeIdToClaim;
-  mapping(uint256 => bytes) public extraDatas;
+  mapping(uint256 => uint64) public disputeIdToClaim;
+  mapping(uint64 => bytes) public extraDatas;
   mapping(IERC20 => bool) public tokenValidity;
 
   /**
@@ -159,9 +172,9 @@ contract Yubiai is IDisputeResolver {
    */
   function newArbSettings(bytes calldata _extraData, string calldata _metaEvidence) external {
     require(msg.sender == governor, "Only governor");
-    currentArbSettingId++;
-    extraDatas[currentArbSettingId] = _extraData;
-    emit MetaEvidence(currentArbSettingId, _metaEvidence);
+    counters.currentArbSettingId++;
+    extraDatas[counters.currentArbSettingId] = _extraData;
+    emit MetaEvidence(counters.currentArbSettingId, _metaEvidence);
   }
 
   /**
@@ -184,7 +197,7 @@ contract Yubiai is IDisputeResolver {
       "Token transfer failed"
     );
     // offering received. that's all you need.
-    _deal.createdAt = block.timestamp;
+    _deal.createdAt = uint32(block.timestamp);
     _deal.state = DealState.Ongoing;
     _deal.claimCount = 0;
     _deal.currentClaim = 0;
@@ -199,16 +212,16 @@ contract Yubiai is IDisputeResolver {
     require(_deal.timeForService <= settings.maxTimeForService, "Too much time for service");
     require(_deal.timeForClaim <= settings.maxTimeForClaim, "Too much time for claim");
     
-    deals[dealCount] = _deal;
-    emit DealCreated(dealCount, _deal, _terms);
-    dealCount++;
+    deals[counters.dealCount] = _deal;
+    emit DealCreated(counters.dealCount, _deal, _terms);
+    counters.dealCount++;
   }
 
   /**
    * @dev Closes a deal. Different actors can close the deal, depending on some conditions.
    * @param _dealId The ID of the deal to be closed.
    */
-  function closeDeal(uint256 _dealId) public {
+  function closeDeal(uint64 _dealId) public {
     Deal storage deal = deals[_dealId];
     require(deal.state == DealState.Ongoing, "Deal is not ongoing");
     // 1. if over the time for service + claim, anyone can close it.
@@ -227,20 +240,20 @@ contract Yubiai is IDisputeResolver {
    * @param _amount Amount to be refunded.
    * @param _evidence Rationale behind the requested refund.
    */
-  function makeClaim(uint256 _dealId, uint256 _amount, string calldata _evidence) external payable {
+  function makeClaim(uint64 _dealId, uint256 _amount, string calldata _evidence) external payable {
     Deal storage deal = deals[_dealId];
     require(msg.sender == deal.buyer, "Only buyer");
     require(deal.amount >= _amount, "Refund cannot be greater than deal");
     require(deal.state == DealState.Ongoing && !isOver(_dealId), "Deal cannot be claimed");
-    uint256 arbFees = arbitrator.arbitrationCost(extraDatas[currentArbSettingId]);
+    uint256 arbFees = arbitrator.arbitrationCost(extraDatas[counters.currentArbSettingId]);
     require(msg.value >= arbFees, "Not enough to cover fees");
-    Claim storage claim = claims[claimCount];
+    Claim storage claim = claims[counters.claimCount];
     claim.dealId = _dealId;
     claim.amount = _amount;
-    claim.createdAt = block.timestamp;
-    claim.arbSettingsId = currentArbSettingId;
-    emit ClaimCreated(_dealId, claimCount, _amount, _evidence);
-    claimCount++;
+    claim.createdAt = uint32(block.timestamp);
+    claim.arbSettingsId = counters.currentArbSettingId;
+    emit ClaimCreated(_dealId, counters.claimCount, _amount, _evidence);
+    counters.claimCount++;
     deal.state = DealState.Claimed;
   }
 
@@ -248,7 +261,7 @@ contract Yubiai is IDisputeResolver {
    * @dev Accept the claim and pay the refund, only be seller.
    * @param _claimId The ID of the claim to accept.
    */
-  function acceptClaim(uint256 _claimId) public {
+  function acceptClaim(uint64 _claimId) public {
     Claim storage claim = claims[_claimId];
     Deal storage deal = deals[claim.dealId];
     require(deal.state == DealState.Claimed, "Deal is not Claimed");
@@ -261,7 +274,7 @@ contract Yubiai is IDisputeResolver {
 
     uint256 arbFees = arbitrator.arbitrationCost(extraDatas[claim.arbSettingsId]);
     _closeDeal(claim.dealId, deal.amount - claim.amount);
-    claim.solvedAt = block.timestamp;
+    claim.solvedAt = uint32(block.timestamp);
     deal.token.transfer(deal.buyer, claim.amount);
     emit ClaimClosed(_claimId, ClaimResult.Accepted);
     payable(deal.buyer).send(arbFees); // it is the buyer responsability to accept eth.
@@ -271,7 +284,7 @@ contract Yubiai is IDisputeResolver {
    * @dev Challenge a refund claim, only by seller. A dispute will be created.
    * @param _claimId The ID of the claim to challenge.
    */
-  function challengeClaim(uint256 _claimId) public payable {
+  function challengeClaim(uint64 _claimId) public payable {
     Claim storage claim = claims[_claimId];
     Deal storage deal = deals[claim.dealId];
     require(msg.sender == deal.seller, "Only seller");
@@ -304,11 +317,11 @@ contract Yubiai is IDisputeResolver {
    */
   function rule(uint256 _disputeId, uint256 _ruling) external {
     require(msg.sender == address(arbitrator), "Only arbitrator rules");
-    uint256 claimId = disputeIdToClaim[_disputeId];
+    uint64 claimId = disputeIdToClaim[_disputeId];
     Claim storage claim = claims[claimId];
     Deal storage deal = deals[claim.dealId];
     require(deal.state == DealState.Disputed, "Deal is not Disputed");
-    claim.solvedAt = block.timestamp;
+    claim.solvedAt = uint32(block.timestamp);
     deal.state = DealState.Ongoing; // will be overwritten if needed.
     // if 0 (RtA) or 1 (Don't refund)...
     if (_ruling < 2) {
@@ -332,7 +345,7 @@ contract Yubiai is IDisputeResolver {
    * @dev Read whether if a claim is over or not.
    * @param _dealId Id of the deal to check.
    */
-  function isOver(uint256 _dealId) public view returns (bool) {
+  function isOver(uint64 _dealId) public view returns (bool) {
     Deal memory deal = deals[_dealId];
     // if finished, then it's "over"
     if (deal.state == DealState.Finished) return (true);
@@ -351,7 +364,7 @@ contract Yubiai is IDisputeResolver {
    * @dev Internal function to close the deal. It will process the fees
    * @param _dealId Id of the deal to check.
    */
-  function _closeDeal(uint256 _dealId, uint256 _amount) internal {
+  function _closeDeal(uint64 _dealId, uint256 _amount) internal {
     Deal storage deal = deals[_dealId];
 
     uint256 ubiFee = _amount * (settings.ubiFee + deal.extraBurnFee) / BASIS_POINTS;
@@ -415,7 +428,7 @@ contract Yubiai is IDisputeResolver {
    *  @return fullyFunded True if the ruling option got fully funded as a result of this contribution.
    */
   function fundAppeal(uint256 _claimId, uint256 _ruling) external payable override returns (bool fullyFunded) {
-    Claim storage claim = claims[_claimId];
+    Claim storage claim = claims[uint64(_claimId)];
     Deal storage deal = deals[claim.dealId];
     require(deal.state == DealState.Disputed, "No dispute to appeal.");
 
@@ -485,7 +498,7 @@ contract Yubiai is IDisputeResolver {
     uint256 _round,
     uint256 _ruling
   ) public override returns (uint256 reward) {
-    Claim storage claim = claims[_claimId];
+    Claim storage claim = claims[uint64(_claimId)];
     Round storage round = claim.rounds[_round];
     require(claim.solvedAt != 0, "Claim not resolved");
     // Allow to reimburse if funding of the round was unsuccessful.
@@ -524,7 +537,7 @@ contract Yubiai is IDisputeResolver {
     address payable _beneficiary,
     uint256 _contributedTo
   ) external override {
-    uint256 numberOfRounds = claims[_claimId].rounds.length;
+    uint256 numberOfRounds = claims[uint64(_claimId)].rounds.length;
     
     for (uint256 roundNumber = 0; roundNumber < numberOfRounds; roundNumber++) {
       withdrawFeesAndRewards(_claimId, _beneficiary, roundNumber, _contributedTo);
@@ -545,12 +558,12 @@ contract Yubiai is IDisputeResolver {
     address payable _beneficiary,
     uint256 _contributedTo
   ) external view override returns (uint256 sum) {
-    if (claims[_claimId].solvedAt == 0) return sum;
+    if (claims[uint64(_claimId)].solvedAt == 0) return sum;
 
-    uint256 finalAnswer = claims[_claimId].ruling;
-    uint256 noOfRounds = claims[_claimId].rounds.length;
+    uint256 finalAnswer = claims[uint64(_claimId)].ruling;
+    uint256 noOfRounds = claims[uint64(_claimId)].rounds.length;
     for (uint256 roundNumber = 0; roundNumber < noOfRounds; roundNumber++) {
-      Round storage round = claims[_claimId].rounds[roundNumber];
+      Round storage round = claims[uint64(_claimId)].rounds[roundNumber];
 
       if (!round.hasPaid[_contributedTo]) {
         // Allow to reimburse if funding was unsuccessful for this answer option.
