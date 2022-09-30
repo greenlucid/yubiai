@@ -42,6 +42,7 @@ contract Yubiai is IDisputeResolver {
     uint256 solvedAt; // if zero, unsolved yet.
     uint256 ruling;
     uint256 arbSettingsId;
+    uint256 arbFees;
     Round[] rounds;
   }
 
@@ -221,18 +222,6 @@ contract Yubiai is IDisputeResolver {
   }
 
   /**
-    notes about claims and an edge case
-    in order to make a claim, ideally, you want both parties to
-    put skin in the game. the buyer needs to put the arb cost (value)
-    and the seller can put it as well and launch a dispute.
-    whoever wins that dispute retrieves their stake.
-    however, arbitration fees could change after the buyer put their
-    stake. an ugly "way" around it is, calculating the arb cost ad hoc,
-    also for refunds. yubiai marketplace can subsidize the difference.
-    arbitration fees shouldn't change often anyway.
-  */
-
-  /**
    * @dev Make a claim on an existing claim. Only the buyer can claim.
    * @param _dealId The ID of the deal to be closed.
    * @param _amount Amount to be refunded.
@@ -289,6 +278,11 @@ contract Yubiai is IDisputeResolver {
     require(deal.state == DealState.Claimed, "Deal is not Claimed");
     require(block.timestamp < claim.createdAt + settings.timeForChallenge, "Too late for challenge");
 
+    // if arbFees are updated between the period the claim is created and challenged:
+    // 1. they rise, so someone should cover the difference so that arbFees are returned
+    //  to winner on rule(...), and prevent contract from halting.
+    // 2. they are lowered, so someone should send the difference to the claimer
+    //  whether they win or lose.
     uint256 arbFees = arbitrator.arbitrationCost(extraDatas[claim.arbSettingsId]);
     require(msg.value >= arbFees, "Not enough to cover fees");
 
@@ -297,7 +291,7 @@ contract Yubiai is IDisputeResolver {
       arbitrator.createDispute{value: arbFees}(NUMBER_OF_RULINGS, extraDatas[claim.arbSettingsId]);
     disputeIdToClaim[disputeId] = _claimId;
     claim.disputeId = disputeId;
-
+    claim.arbFees = arbFees;
     deal.state = DealState.Disputed;
     
     emit Dispute(arbitrator, disputeId, claim.arbSettingsId, _claimId);
@@ -315,9 +309,6 @@ contract Yubiai is IDisputeResolver {
     Deal storage deal = deals[claim.dealId];
     require(deal.state == DealState.Disputed, "Deal is not Disputed");
     claim.solvedAt = block.timestamp;
-    // get arb fees for refunds. if extraData was modified,
-    // yubiai should send value to the contract to stop from halting.
-    uint256 arbFees = arbitrator.arbitrationCost(extraDatas[claim.arbSettingsId]);
     deal.state = DealState.Ongoing; // will be overwritten if needed.
     // if 0 (RtA) or 1 (Don't refund)...
     if (_ruling < 2) {
@@ -325,13 +316,13 @@ contract Yubiai is IDisputeResolver {
       if (deal.claimCount >= settings.maxClaims) {
         _closeDeal(claim.dealId, deal.amount);
       }
-      payable(deal.seller).send(arbFees);
+      payable(deal.seller).send(claim.arbFees);
       emit ClaimClosed(claimId, ClaimResult.Rejected);
     } else {
       deal.token.transfer(deal.buyer, claim.amount);
       _closeDeal(claim.dealId, deal.amount - claim.amount);
       // refund buyer
-      payable(deal.buyer).send(arbFees);
+      payable(deal.buyer).send(claim.arbFees);
       emit ClaimClosed(claimId, ClaimResult.Accepted);
     }
     emit Ruling(arbitrator, _disputeId, _ruling);
