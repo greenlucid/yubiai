@@ -16,6 +16,10 @@ import "@kleros/erc-792/contracts/erc-1497/IEvidence.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@kleros/dispute-resolver-interface-contract/contracts/IDisputeResolver.sol";
 
+interface WXDAI is IERC20 {
+  function deposit() external payable;
+}
+
 contract Yubiai is IDisputeResolver {
   // None: It hasn't even begun.
   // Ongoing: Exists, it's not currently being claimed.
@@ -115,6 +119,9 @@ contract Yubiai is IDisputeResolver {
   uint256 constant LOSER_STAKE_MULTIPLIER = 10_000;
   uint256 constant LOSER_APPEAL_PERIOD_MULTIPLIER = 5_000;
 
+  // used for automatically creating deals with wrapped value
+  address constant wxdai = 0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d; 
+
   Counters public counters;
   YubiaiSettings public settings;
   address public governor;
@@ -190,6 +197,7 @@ contract Yubiai is IDisputeResolver {
   /**
    * @dev Creates a deal, an agreement between buyer and seller.
    * @param _deal The deal that is to be created. Some properties may be mutated.
+   * @param _terms An IPFS link giving extra context of the terms of the deal.
    */
   function createDeal(Deal memory _deal, string memory _terms) public {
     require(
@@ -212,6 +220,35 @@ contract Yubiai is IDisputeResolver {
     require(_deal.timeForService <= settings.maxTimeForService, "Too much time for service");
     require(_deal.timeForClaim <= settings.maxTimeForClaim, "Too much time for claim");
     
+    deals[counters.dealCount] = _deal;
+    emit DealCreated(counters.dealCount, _deal, _terms);
+    counters.dealCount++;
+  }
+
+  /**
+   * @dev Like createDeal, but with msg.value, allowing users to not need to wrap xDAI.
+   *  The seller (or buyer, in case refunds occur) will receive WXDAI, though.
+   * @param _deal The deal that is to be created. Some properties may be mutated.
+   * @param _terms An IPFS link giving extra context of the terms of the deal.
+   */
+  function createDealWithValue(Deal memory _deal, string memory _terms) public payable {
+    // wrap the value
+    WXDAI(wxdai).deposit{value: msg.value}();
+    _deal.amount = msg.value;
+    _deal.token = IERC20(wxdai);
+    // the rest of the function is pretty much a copy of the regular createDeal
+    _deal.createdAt = uint32(block.timestamp);
+    _deal.state = DealState.Ongoing;
+    _deal.claimCount = 0;
+    _deal.currentClaim = 0;
+
+    // verify max extra fee
+    require(_deal.extraBurnFee <= settings.maxExtraFee, "Extra fee too large");
+    // only allowed time spans
+    require(_deal.timeForService >= settings.minTimeForService, "Too little time for service");
+    require(_deal.timeForClaim >= settings.minTimeForClaim, "Too little time for claim");
+    require(_deal.timeForService <= settings.maxTimeForService, "Too much time for service");
+    require(_deal.timeForClaim <= settings.maxTimeForClaim, "Too much time for claim");
     deals[counters.dealCount] = _deal;
     emit DealCreated(counters.dealCount, _deal, _terms);
     counters.dealCount++;
