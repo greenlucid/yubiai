@@ -337,11 +337,7 @@ contract Yubiai is IDisputeResolver {
     // if finished, then it's "over"
     if (deal.state == DealState.Finished) return (true);
     // if none, it hasn't even begun. if claimed or disputed, it can't be over yet.
-    if (
-      deal.state == DealState.None
-      || deal.state == DealState.Claimed
-      || deal.state == DealState.Disputed
-    ) return (false);
+    if (deal.state != DealState.Ongoing) return (false);
     // so, it's Ongoing. if no claims, then createdAt is the reference
     if (deal.claimCount == 0) {
       return (block.timestamp >= (deal.createdAt + deal.timeForService + deal.timeForClaim));
