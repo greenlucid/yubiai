@@ -21,9 +21,10 @@ interface WXDAI is IERC20 {
 }
 
 contract Yubiai is IDisputeResolver {
-  // None: It hasn't even begun.
+  // None: Deal hasn't even begun.
   // Ongoing: Exists, it's not currently being claimed.
   // Claimed: The seller made a claim to obtain a refund.
+  // Disputed: A claim on this deal is being disputed.
   // Finished: It's over.
   enum DealState {None, Ongoing, Claimed, Disputed, Finished}
 
@@ -32,7 +33,7 @@ contract Yubiai is IDisputeResolver {
   // Round struct stores the contributions made to particular rulings.
   struct Round {
     mapping(uint256 => uint256) paidFees; // Tracks the fees paid in this round in the form paidFees[ruling].
-    mapping(uint256 => bool) hasPaid; // True if the fees for this particular answer have been fully paid in the form hasPaid[ruling].
+    mapping(uint256 => bool) hasPaid; // True if the fees for this particular ruling have been fully paid in the form hasPaid[ruling].
     mapping(address => mapping(uint256 => uint256)) contributions; // Maps contributors to their contributions for each ruling in the form contributions[address][answer].
     uint256 feeRewards; // Sum of reimbursable appeal fees available to the parties that made contributions to the ruling that ultimately wins a dispute.
     uint256[] fundedAnswers; // Stores the choices that are fully funded.
@@ -272,8 +273,8 @@ contract Yubiai is IDisputeResolver {
   }
 
   /**
-   * @dev Make a claim on an existing claim. Only the buyer can claim.
-   * @param _dealId The ID of the deal to be closed.
+   * @dev Make a claim on an existing deal. Only the buyer can claim.
+   * @param _dealId The ID of the deal to make a claim on.
    * @param _amount Amount to be refunded.
    * @param _evidence Rationale behind the requested refund.
    */
@@ -295,7 +296,7 @@ contract Yubiai is IDisputeResolver {
   }
 
   /**
-   * @dev Accept the claim and pay the refund, only be seller.
+   * @dev Accept the claim and pay the refund, only by seller.
    * @param _claimId The ID of the claim to accept.
    */
   function acceptClaim(uint64 _claimId) public {
@@ -314,7 +315,7 @@ contract Yubiai is IDisputeResolver {
     claim.solvedAt = uint32(block.timestamp);
     deal.token.transfer(deal.buyer, claim.amount);
     emit ClaimClosed(_claimId, ClaimResult.Accepted);
-    payable(deal.buyer).send(arbFees); // it is the buyer responsability to accept eth.
+    payable(deal.buyer).send(arbFees); // it is the buyer responsibility to accept eth.
   }
 
   /**
