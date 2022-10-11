@@ -121,7 +121,7 @@ contract Yubiai is IDisputeResolver {
   uint256 constant LOSER_APPEAL_PERIOD_MULTIPLIER = 5_000;
 
   // used for automatically creating deals with wrapped value
-  address constant wxdai = 0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d; 
+  WXDAI constant wxdai = WXDAI(0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d); 
 
   Counters public counters;
   YubiaiSettings public settings;
@@ -234,9 +234,9 @@ contract Yubiai is IDisputeResolver {
    */
   function createDealWithValue(Deal memory _deal, string memory _terms) public payable {
     // wrap the value
-    WXDAI(wxdai).deposit{value: msg.value}();
+    wxdai.deposit{value: msg.value}();
     _deal.amount = msg.value;
-    _deal.token = IERC20(wxdai);
+    _deal.token = wxdai;
     // the rest of the function is pretty much a copy of the regular createDeal
     _deal.createdAt = uint32(block.timestamp);
     _deal.state = DealState.Ongoing;
