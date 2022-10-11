@@ -290,9 +290,12 @@ contract Yubiai is IDisputeResolver {
     claim.amount = _amount;
     claim.createdAt = uint32(block.timestamp);
     claim.arbSettingsId = counters.currentArbSettingId;
+
+    deal.state = DealState.Claimed;
+    deal.claimCount++;
+    deal.currentClaim = counters.claimCount;
     emit ClaimCreated(_dealId, counters.claimCount, _amount, _evidence);
     counters.claimCount++;
-    deal.state = DealState.Claimed;
   }
 
   /**
