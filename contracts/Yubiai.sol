@@ -363,6 +363,7 @@ contract Yubiai is IDisputeResolver {
     Deal storage deal = deals[claim.dealId];
     require(deal.state == DealState.Disputed, "Deal is not Disputed");
     claim.solvedAt = uint32(block.timestamp);
+    claim.ruling = uint8(_ruling);
     deal.state = DealState.Ongoing; // will be overwritten if needed.
     // if 0 (RtA) or 1 (Don't refund)...
     if (_ruling < 2) {
