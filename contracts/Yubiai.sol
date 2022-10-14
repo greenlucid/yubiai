@@ -282,7 +282,11 @@ contract Yubiai is IDisputeResolver {
     Deal storage deal = deals[_dealId];
     require(msg.sender == deal.buyer, "Only buyer");
     require(deal.amount >= _amount, "Refund cannot be greater than deal");
-    require(deal.state == DealState.Ongoing && !isOver(_dealId), "Deal cannot be claimed");
+    require(
+      deal.state == DealState.Ongoing
+      && block.timestamp >= (deal.createdAt + deal.timeForService)
+      && !isOver(_dealId), "Deal cannot be claimed"
+    );
     uint256 arbFees = arbitrator.arbitrationCost(extraDatas[counters.currentArbSettingId]);
     require(msg.value >= arbFees, "Not enough to cover fees");
     Claim storage claim = claims[counters.claimCount];
@@ -384,7 +388,7 @@ contract Yubiai is IDisputeResolver {
   }
 
   /**
-   * @dev Read whether if a claim is over or not.
+   * @dev Read whether if a deal is over or not.
    * @param _dealId Id of the deal to check.
    */
   function isOver(uint64 _dealId) public view returns (bool) {
