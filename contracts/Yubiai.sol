@@ -351,7 +351,9 @@ contract Yubiai is IDisputeResolver {
     claim.disputeId = disputeId;
     claim.arbFees = arbFees;
     deal.state = DealState.Disputed;
-    
+    // initializes the round array
+    claim.rounds.push();
+
     emit Dispute(arbitrator, disputeId, claim.arbSettingsId, _claimId);
   }
 
