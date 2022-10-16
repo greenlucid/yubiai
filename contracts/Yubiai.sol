@@ -479,7 +479,7 @@ contract Yubiai is IDisputeResolver {
     Claim storage claim = claims[uint64(_claimId)];
     Deal storage deal = deals[claim.dealId];
     require(deal.state == DealState.Disputed, "No dispute to appeal.");
-
+    require(_ruling < 3, "Invalid ruling");
     uint256 disputeId = claim.disputeId;
     (uint256 appealPeriodStart, uint256 appealPeriodEnd) = arbitrator.appealPeriod(disputeId);
     require(block.timestamp >= appealPeriodStart && block.timestamp < appealPeriodEnd, "Appeal period is over.");
