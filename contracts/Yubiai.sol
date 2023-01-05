@@ -16,7 +16,7 @@ import "@kleros/erc-792/contracts/erc-1497/IEvidence.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@kleros/dispute-resolver-interface-contract/contracts/IDisputeResolver.sol";
 
-interface WXDAI is IERC20 {
+interface WETH is IERC20 {
   function deposit() external payable;
 }
 
@@ -121,7 +121,7 @@ contract Yubiai is IDisputeResolver {
   uint256 constant LOSER_APPEAL_PERIOD_MULTIPLIER = 5_000;
 
   // used for automatically creating deals with wrapped value
-  WXDAI constant wxdai = WXDAI(0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d); 
+  WETH constant weth = WETH(0xB4FBF271143F4FBf7B91A5ded31805e42b2208d6); 
 
   Counters public counters;
   YubiaiSettings public settings;
@@ -228,15 +228,15 @@ contract Yubiai is IDisputeResolver {
 
   /**
    * @dev Like createDeal, but with msg.value, allowing users to not need to wrap xDAI.
-   *  The seller (or buyer, in case refunds occur) will receive WXDAI, though.
+   *  The seller (or buyer, in case refunds occur) will receive WETH, though.
    * @param _deal The deal that is to be created. Some properties may be mutated.
    * @param _terms An IPFS link giving extra context of the terms of the deal.
    */
   function createDealWithValue(Deal memory _deal, string memory _terms) public payable {
     // wrap the value
-    wxdai.deposit{value: msg.value}();
+    weth.deposit{value: msg.value}();
     _deal.amount = msg.value;
-    _deal.token = wxdai;
+    _deal.token = weth;
     // the rest of the function is pretty much a copy of the regular createDeal
     _deal.createdAt = uint32(block.timestamp);
     _deal.state = DealState.Ongoing;

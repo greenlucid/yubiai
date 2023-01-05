@@ -1,0 +1,20 @@
+# Params para Yubiai
+
+SETTINGS = [
+  "<wallet address del SAFE>",
+  3,
+  432000,
+  302400,
+  "<wallet UBI Burner de Gnosis testnet)",
+  0,
+  60,
+  20000,
+  432000,
+  864000,
+  432000,
+  864000
+]
+GOVERNOR = "<wallet address del SAFE>"
+ARBITRATOR = "<address del arbitrator>"
+EXTRA_DATA = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+METAEVIDENCE = "/ipfs/QmWD6CvGaXBBUwypX3vNDQ3ZQoUYqooEpccAhFHdpx2jRF/metaevidence.json"
